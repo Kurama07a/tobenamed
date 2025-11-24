@@ -15,14 +15,19 @@ import ReactFlow, {
     useReactFlow,
     Panel,
     MarkerType,
+    getRectOfNodes,
+    SelectionMode,
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { v4 as uuidv4 } from 'uuid';
 import BrowserNode from './nodes/BrowserNode';
-import { Plus, Search, Focus } from 'lucide-react';
+import GroupNode from './nodes/GroupNode';
+import Sidebar from './Sidebar';
+import { Plus, Search, Focus, Group, ZoomIn, ZoomOut } from 'lucide-react';
 
 const nodeTypes = {
     browser: BrowserNode,
+    group: GroupNode,
 };
 
 const INITIAL_NODES: Node[] = [
@@ -49,7 +54,7 @@ const defaultEdgeOptions = {
 const GraphCanvasContent = () => {
     const [nodes, setNodes, onNodesChange] = useNodesState(INITIAL_NODES);
     const [edges, setEdges, onEdgesChange] = useEdgesState([]);
-    const { fitView, setCenter } = useReactFlow();
+    const { fitView, setCenter, zoomIn, zoomOut } = useReactFlow();
 
     const onConnect = useCallback(
         (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true, style: { stroke: '#71717a' } }, eds)),
@@ -57,7 +62,7 @@ const GraphCanvasContent = () => {
     );
 
     const handleDeleteNode = useCallback((id: string) => {
-        setNodes((nds) => nds.filter((node) => node.id !== id));
+        setNodes((nds) => nds.filter((node) => node.id !== id && node.parentNode !== id));
         setEdges((eds) => eds.filter((edge) => edge.source !== id && edge.target !== id));
     }, [setNodes, setEdges]);
 
@@ -89,11 +94,32 @@ const GraphCanvasContent = () => {
         const sourceNode = nodes.find((n) => n.id === sourceNodeId);
         if (!sourceNode) return;
 
+        // Find existing children of the source node to prevent overlap
+        const childEdges = edges.filter(e => e.source === sourceNodeId);
+        const childNodeIds = new Set(childEdges.map(e => e.target));
+        const childNodes = nodes.filter(n => childNodeIds.has(n.id));
+
+        let newY = sourceNode.position.y;
+
+        if (childNodes.length > 0) {
+            // Find the lowest child (max Y)
+            const lowestChild = childNodes.reduce((prev, current) => {
+                return (prev.position.y > current.position.y) ? prev : current;
+            });
+
+            // Calculate new Y: lowest child Y + height + gap
+            const childHeight = parseInt(String(lowestChild.style?.height || 600));
+            newY = lowestChild.position.y + childHeight + 50; // 50px gap
+        } else {
+            // First child - slight random offset for organic feel, or just align
+            newY = sourceNode.position.y + (Math.random() * 100 - 50);
+        }
+
         const newNodeId = uuidv4();
         // Offset logic for visual tree
         const newPosition = {
             x: sourceNode.position.x + 900, // Increased offset for larger nodes
-            y: sourceNode.position.y + (Math.random() * 200 - 100),
+            y: newY,
         };
 
         const newNode: Node = {
@@ -146,8 +172,48 @@ const GraphCanvasContent = () => {
         setTimeout(() => fitView({ nodes: [newNode], duration: 800 }), 100);
     };
 
+    const createGroup = () => {
+        const selectedNodes = nodes.filter(n => n.selected && n.type !== 'group');
+        if (selectedNodes.length === 0) return;
+
+        const rect = getRectOfNodes(selectedNodes);
+        const groupId = uuidv4();
+        const padding = 50;
+
+        const groupNode: Node = {
+            id: groupId,
+            type: 'group',
+            position: { x: rect.x - padding, y: rect.y - padding },
+            style: {
+                width: rect.width + padding * 2,
+                height: rect.height + padding * 2,
+            },
+            data: { label: 'New Group' },
+            selected: true,
+        };
+
+        // Update children to be relative to parent
+        const updatedChildren = selectedNodes.map(node => ({
+            ...node,
+            parentNode: groupId,
+            extent: 'parent',
+            position: {
+                x: node.position.x - (rect.x - padding),
+                y: node.position.y - (rect.y - padding),
+            },
+            selected: false,
+        } as Node));
+
+        setNodes((nds) => {
+            const nonSelectedNodes = nds.filter(n => !n.selected || n.type === 'group');
+            return [...nonSelectedNodes, groupNode, ...updatedChildren];
+        });
+    };
+
     return (
-        <div className="w-full h-screen bg-[#09090b] text-zinc-100">
+        <div className="w-full h-screen bg-[#09090b] text-zinc-100 relative">
+            <Sidebar nodes={nodes} />
+
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
@@ -162,16 +228,17 @@ const GraphCanvasContent = () => {
                 panOnDrag={[1, 2]}
                 zoomOnScroll
                 zoomOnDoubleClick
+                selectionMode={SelectionMode.Partial} // Allow partial selection
                 className="bg-[#09090b]"
             >
                 <Background color="#27272a" gap={20} size={1} />
 
-                <Controls className="bg-zinc-900 border-zinc-800 fill-zinc-400 text-zinc-400" />
-
                 <MiniMap
                     className="bg-zinc-900 border border-zinc-800 rounded-lg shadow-2xl"
-                    maskColor="rgba(9, 9, 11, 0.8)"
-                    nodeColor={() => '#3f3f46'} // Zinc-700
+                    maskColor="rgba(0, 0, 0, 0.6)" // Lighter mask to see nodes outside viewport
+                    nodeColor="#a1a1aa" // Zinc-400 for high visibility
+                    pannable
+                    zoomable
                 />
 
                 {/* Top Bar / Navigation */}
@@ -195,14 +262,43 @@ const GraphCanvasContent = () => {
                             <Plus size={16} />
                             <span>New Node</span>
                         </button>
+
                         <div className="w-px h-6 bg-zinc-800 mx-1" />
+
                         <button
-                            onClick={() => fitView({ duration: 800 })}
-                            className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
-                            title="Recenter Map"
+                            onClick={createGroup}
+                            className="bg-zinc-800 text-zinc-300 px-3 py-2 rounded-lg text-sm font-medium hover:bg-zinc-700 hover:text-white transition-all flex items-center gap-2"
+                            title="Group Selected Nodes"
                         >
-                            <Focus size={18} />
+                            <Group size={16} />
+                            <span>Group</span>
                         </button>
+
+                        <div className="w-px h-6 bg-zinc-800 mx-1" />
+
+                        <div className="flex items-center gap-1">
+                            <button
+                                onClick={() => zoomOut()}
+                                className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
+                                title="Zoom Out"
+                            >
+                                <ZoomOut size={18} />
+                            </button>
+                            <button
+                                onClick={() => zoomIn()}
+                                className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
+                                title="Zoom In"
+                            >
+                                <ZoomIn size={18} />
+                            </button>
+                            <button
+                                onClick={() => fitView({ duration: 800 })}
+                                className="p-2 hover:bg-zinc-800 rounded-lg text-zinc-400 hover:text-zinc-200 transition-colors"
+                                title="Recenter Map"
+                            >
+                                <Focus size={18} />
+                            </button>
+                        </div>
                     </div>
                 </Panel>
             </ReactFlow>
